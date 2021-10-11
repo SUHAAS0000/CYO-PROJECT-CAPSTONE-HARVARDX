@@ -1,0 +1,1473 @@
+---
+title: "Credit Card Fraud Detection"
+author: "PEDIREDLA SUHAAS"
+date: "10/6/2021"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.align = "center", fig.width = 6, fig.height = 3.5, options(digits = 2))
+# Note to Reviewers/Graders:  Sorry this dataset is huge and the models take a long time to run.  
+
+```
+
+```{r libraries, message = FALSE, error = FALSE,  warning = FALSE, include = FALSE}
+# Require & Load Libraries
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(readr)) install.packages("readr",  repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(kableExtra)) install.packages("kableExtra", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(scales)) install.packages("scales",  repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+if(!require(geosphere)) install.packages("geosphere", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(rpart)) install.packages("rpart",  repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest",  repos = "http://cran.us.r-project.org")
+library(tidyverse)
+library(data.table)
+library(readr)
+library(knitr)
+library(kableExtra)
+library(gridExtra) 
+library(scales)
+library(lubridate)
+library(geosphere)
+library(caret)
+library(rpart)
+library(randomForest)
+options(scipen = 999)
+# Checking memory limit
+memory.limit()
+# Increasing memory limit to allocate vectors of 3 Gb. I'm running 64-bit Windows. 
+memory.limit(size=48000)
+```
+
+
+## Introduction
+
+Credit card fraud losses total billions of dollars each year and is a major problem for financial institutions, customers and merchants. The 2018 Nilson Report estimated over $9 billion in fraudulent credit card transactions in the United State alone.  Banks process thousands of transactions every minute and possess huge data sets, making good fraud detection models both necessary and possible. Since credit card companies cannot release real client data due to confidentiality, I chose a synthetic dataset from Kaggle to explore the issue.  While synthetic data will not show real-world trends or unearth new predictors, it still provides excellent practice for analysis and machine learning modeling to detect anomalies and trends.
+
+The dataset was generated using a Sparkov Data Generation Tool containing 23 real-life variables. It contains two years of data for 1000 cardholders. The set can be found at [kaggle.com/kartik2112/fraud-detection](https://www.kaggle.com/kartik2112/fraud-detection).  The data has already been split into training and test sets. The training set is large with over 1.2 million rows.  
+
+I will explore the data to look for trends to detect fraud. Once relevant features are chosen, I will compare several algorithms presented in [HarvardX's Machine Learning course](https://rafalab.github.io/dsbook/examples-of-algorithms.html). The biggest problem for fraud detection models are imbalanced datasets. Credit card datasets are very large with few fraudulent transactions.  Therefore, instead of overall accuracy, the focus of this project will be the process of choosing predictors, comparing and tuning algorithms for predicting the minority class and cost-saving results.  
+  
+  
+
+```{r importing data, message = FALSE, error = FALSE,  warning = FALSE}
+# Data sets uploaded to github as specified in project instructions. 
+# Create temp file and download zip file containing dataset
+dl <- tempfile()
+download.file("https://github.com/KHHogan06/CYO-Project/releases/download/v1-files/fraud_data.zip", dl)
+# unzip
+unzip(dl)
+# read & import csv files
+fraudTest <- read_csv(unzip(dl,"fraudTest.csv"))
+fraudTrain <- read_csv(unzip(dl,"fraudTrain.csv"))
+# remove tempfile
+rm(dl)
+```
+
+## Data Analysis
+
+### Data Exploration
+
+Even before downloading the data, I could see the variables are a mixture of date, categorical, numeric, and geospatial data. Examining the variables:
+
+```{r fraudTrain data, comment="", message = FALSE, error = FALSE,  warning = FALSE}  
+# Exploring data set variables & structure
+glimpse(fraudTrain)
+```  
+  
+  
+  
+The variables are a mixture of customer, merchant and transaction specific data.  Customer related variables include: first & last name, gender, multiple columns of address information, date of birth, and job.  Transaction variables are: date and time, card number, purchase category, amount, id, unix time, and if fraud. Merchant variables include: name, latitude and longitude. There is also a row id.  
+  
+There are quite a few redundant variables.  First/last names and cc_num all identify for the individual account.  There are seven variables related to the account address: street address, city, zip code, state, city population, longitude and latitude. The street address of a customer can be a good predictor of fraud. It isn't a logical predictor in this dataset since the is no transaction processing data included.  Instead, I will focus on cc_nums, longitude, and latitude.  
+  
+  
+  
+Summary of numeric and date variables:  
+  
+```{r fraudTrain summary, comment="", message = FALSE, error = FALSE,  warning = FALSE}  
+# Exploring date & numeric variables
+fraudTrain[c(2:3,6,13,16,18,23)] %>% summary()
+  
+```
+  
+  
+  
+The summary provides several important revelations. Even though transaction amounts have a large range from $1 to $28,000, the mean is only $70. Since the third quartile starts at $80, it is apparent that most transactions are under $100.   
+
+The date range is 2019-01-01 to 2020-06-21 not the expected two years.  The Kaggle page stated the data covered two years from 2019 to 2020. When I check the date ranges I see that the training and test sets were split by dates where the test set is the last six months.  
+
+Training set: `r  range(fraudTrain$trans_date_trans_time)`.  Test set: `r  range(fraudTest$trans_date_trans_time)`.  
+  
+  
+This seems like a poor sampling method especially for time trends.  I will recombine data then repartition into 80/20 training and test splits based on random sampling method.
+
+
+```{r Recreating training & test sets, message = FALSE, error = FALSE, warning = FALSE}
+# Combining pre-split train & test sets. Must first remove X1 variable (row number).
+fraudTest <- fraudTest[,-1]
+fraudTrain <- fraudTrain[,-1]
+fraudSet <- rbind(fraudTrain, fraudTest)
+# Removing
+rm(fraudTest, fraudTrain)
+# Creating Random Sampling of Training & 20% Final Test set of fraud data. 
+set.seed(1, sample.kind="Rounding") 
+test_index <- createDataPartition(y = fraudSet$is_fraud, times = 1, p = 0.2, list = FALSE)
+train_set <- fraudSet[-test_index,]
+test_set <- fraudSet[test_index,]
+```
+  
+Once resampled, I have both training and test sets covering two years. Tabling the proportion of is_fraud for shows 0.52% fraud transactions.
+
+```{r Proportion fraud in the sets, comment="", message = FALSE, error = FALSE, warning = FALSE}
+# proportion of fraudulent transactions
+prop.table(table(train_set$is_fraud)) 
+# removing FraudSet 
+rm(fraudSet)
+```
+  
+
+
+Now that the training set is repartitioned, I want to explore the difference between legitimate and fraudulent transactions to better understand to data.
+ 
+ 
+```{r Legitimate vs fraud transactions, message = FALSE, error = FALSE, warning = FALSE}
+# Fraud vs legitimate average & total transaction amounts & # trans 
+kable(train_set %>% group_by(is_fraud) %>% summarize(avg_trans = mean(amt), med_trans = median(amt), amt = sum(amt), n = n()) %>% mutate(pct_amt = (amt/sum(amt))*100, pct_n = (n/sum(n))*100), digits = 2) %>%
+   kable_styling(font_size = 9, latex_options = "HOLD_position")
+```
+
+
+The cost of fraud in the training set is $4,124,923 and 4% of the total amount which is eight times higher than the percent of number of transactions. The average fraud transaction is much higher at $534 making amount a likely predictor.  Since the average for fraudulent transaction is much higher, I need to investigate further and will summarize the transaction amounts into segments (bins).  
+
+
+```{r bins summary, message = FALSE, error = FALSE, warning = FALSE}
+# Summary of Bins by Fraud
+kable(train_set %>% mutate(bins = cut(amt, breaks = c(-Inf, 100, 1000, Inf), labels = c("<$100","$100-$999","$1K+"))) %>%
+  group_by(bins, is_fraud) %>% summarize(amt = sum(amt), n = n())  %>% mutate(pct_amt = (amt/sum(amt))*100), digits = 2) %>%
+  kable_styling(font_size = 9, latex_options = "hold_position")
+```
+  
+\  
+\  
+  
+Since over 1.2 million transactions are under $100 this segment will overwhelm the visualization of the amount distribution if viewed together. When I segment transaction amounts into bins and allow the scales to float according to its bin, I can achieve a better understanding of that segment's distribution.    
+\  
+
+
+```{r bins trans amts histograms, message = FALSE, error = FALSE, warning = FALSE, fig.width = 6.5, fig.height = 2.25}
+# Distributions of Transaction Amounts
+train_set %>% filter(is_fraud == 0) %>% mutate(bins = cut(amt, breaks = c(-Inf, 100, 1000, Inf), labels = c("<$100","$100-$999","$1K+"))) %>%
+  ggplot(aes(amt)) + geom_histogram(bins = 40, fill = "#56B4E9") + labs(x="amount", y="") +
+  theme_bw(base_size = 9) + theme(plot.title = element_text(size = 10)) + 
+  ggtitle("Legitimate Transaction Amounts ($s)") + facet_wrap(~ bins, scales = "free")
+# Distributions of Fraud Transaction Amounts
+train_set %>% filter(is_fraud == 1) %>% mutate(bins = cut(amt, breaks = c(-Inf, 100, 1000, Inf), labels = c("<$100","$100-$999","$1K+"))) %>%
+  ggplot(aes(amt)) + geom_histogram(bins = 40, fill = "#56B4E9") + labs(x="amount", y="") +
+  theme_bw(base_size = 9) + theme(plot.title = element_text(size = 10)) +
+  ggtitle("Fraudulent Transaction Amounts ($s)") + facet_wrap(~ bins, scales = "free") 
+```  
+\  
+\  
+
+While the majority of legitimate transactions are under $100, 78% of fraudulent transactions are over $100.  The amount of the transaction is definitely a predictor.  
+\    
+\  
+
+Next I want to explore categories. What are the actual transaction amounts by category, and how do they vary?  
+
+
+```{r trans amts by category, message = FALSE, error = FALSE, warning = FALSE, fig.width = 7, fig.height = 4.5}
+# Amounts by Category
+cat_amt <- train_set %>% filter(is_fraud == 0) %>%
+  ggplot(aes(amt)) + geom_histogram(bins = 40, fill = "56B4E9") + labs(x="",y="") +
+  theme_bw(base_size = 9) + ggtitle("Legitimate Transaction Amounts ($s)") + facet_wrap(~category)
+# Fraud Amounts by Category
+fcat_amt <- train_set %>% filter(is_fraud == 1) %>%
+  ggplot(aes(amt)) + geom_histogram(bins = 40, fill = "56B4E9") + labs(x="",y="") +
+  theme_bw(base_size = 9) + ggtitle("Fraudulent Transaction Amounts ($s)") + facet_wrap(~category)
+grid.arrange(cat_amt, fcat_amt, ncol = 2)
+rm(cat_amt, fcat_amt)
+```
+
+
+Category amount distribution differs drastically for fraudulent transactions but remains similar for otherwise.  
+  
+  
+
+```{r category amounts barchart, message = FALSE, error = FALSE, warning = FALSE, fig.width = 6, fig.height = 3.5}
+# Barchart with Fraud & Legit sales by category $s
+train_set %>% mutate(is_fraud = as.factor(is_fraud)) %>% group_by(category, is_fraud) %>% summarize(amt = sum(amt), n = n()) %>%
+  ggplot(aes(x = amt,y = reorder(category,amt), fill = is_fraud)) + geom_bar(stat = "identity") + 
+  labs(x="Transaction Amount", y="") + scale_fill_manual(values=c("grey68","darkorange2")) + theme_bw(base_size = 9) + 
+  scale_x_continuous(labels = comma) + theme(legend.position = "bottom", legend.key.height = unit(.4, "cm"), plot.title = element_text(size = 10)) +
+  ggtitle("Sales Category Break Down") 
+```
+
+These charts show that fraud transactions are very to specific ranges within categories. Looking at the fraud amounts range by category, it is possible to use amount bins to better predict fraud.  
+  
+
+```{r fraud range by category, message = FALSE, error = FALSE, warning = FALSE, fig.width = 7, fig.height = 5}
+# viewing range of trans amts by category: legit vs fraud (Top Outliers removed for readability.)
+train_set %>% filter(amt < 1200) %>% mutate(is_fraud = as.factor(is_fraud)) %>% group_by(is_fraud, category) %>% 
+  ggplot(aes(is_fraud,y=amt, color = is_fraud)) +
+  geom_boxplot(lwd=.5,outlier.size=.75, outlier.alpha = .3) + theme_bw(base_size = 9) + 
+  scale_y_continuous(breaks = c(0,250,500,750,1000)) + scale_color_manual(values=c("grey68","darkorange2")) + ylab("amount") +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank(), axis.text.x=element_blank(), axis.title.x=element_blank(),  plot.title = element_text(size = 10)) + ggtitle("Transaction Amount Ranges by Category: Legit vs Fraud") + facet_wrap(~category, ncol = 4)
+```
+
+```{r fraud amt split by category, message = FALSE, error = FALSE, warning = FALSE, fig.width = 7, fig.height = 4}
+##(Grid) Fraud & Legit Breakdown per category by % Amount 
+train_set %>% mutate(bins = cut(amt, breaks =  c(-Inf, 100, 250, 800, 1400, Inf), labels = c("<$100","$100-$249","$250-$799","$800-$1400","$1.4K+")), is_fraud = as.factor(is_fraud))  %>% 
+  group_by(is_fraud,category,bins) %>% summarize(amt = sum(amt)) %>% mutate(pct_amt = (amt/sum(amt))) %>%
+  ggplot(aes(x = pct_amt,y = reorder(category,pct_amt), fill = is_fraud)) +
+  geom_col(position = position_dodge2(width = 0.9, preserve = "single")) + labs(x="Percent Total Transaction Amounts", y="") + 
+  theme_bw(base_size = 9) + scale_x_continuous(labels = comma) + scale_fill_manual(values=c("grey68","darkorange2")) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Breakdown of Transaction Amounts by Category") + facet_grid(~bins)  
+```
+  
+  
+The transaction amount and category are very good predictors in this dataset.  
+  
+I believe date and time elements will provide important insights. Visualizing all transactions on an account with fraud will help get an idea of fraud/legit timing.  
+
+
+```{r fraud example, message = FALSE, error = FALSE, warning = FALSE, fig.width = 5, fig.height = 2.75}
+# looking at all trans of cc_num with fraud trans
+train_set %>% filter(cc_num == 60416207185) %>% mutate(trans_date = as_date(trans_date_trans_time), is_fraud = as.factor(is_fraud)) %>%
+  ggplot(aes(trans_date_trans_time, amt, color = is_fraud)) + geom_point() +
+  ylab("Transaction Amount") + scale_color_manual(values = c("#CCCCCC", "#990000")) + theme_bw(base_size = 9) + 
+  theme(legend.position = "bottom", panel.grid.minor = element_blank(), axis.title.x=element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Example CC Account Transactions 2019-2020: Legitimate vs Fraud") 
+```
+  
+  
+It appears that fraud happens quickly in groups.  Timing and frequency both appear to be predictors.  When looking at number of fraud charges by account and merchant, it is apparent that fraud is repeated significantly on both.
+
+```{r repeat fraud, message = FALSE, error = FALSE, warning = FALSE, fig.width = 6, fig.height = 2}
+# Repeat fraud by CC
+repeat_cc <- train_set %>% filter(is_fraud ==1) %>% group_by(cc_num) %>% 
+  summarize(total = sum(amt), avg = mean(amt), n = n()) %>% 
+  ggplot(aes(n)) + geom_histogram(bins = 30,fill = "56B4E9") + theme_bw(base_size = 10) +
+  theme(plot.title = element_text(size = 9), axis.title=element_blank()) + ggtitle("Number of Fraud Trans on Same CC")
+# Repeat fraud by Merchant
+repeat_merc <- train_set %>% filter(is_fraud ==1) %>% group_by(merchant) %>% 
+  summarize(total = sum(amt), avg = mean(amt), n = n()) %>%
+  ggplot(aes(n)) + geom_histogram(bins = 40,fill = "56B4E9") + theme_bw(base_size = 10) + 
+  theme(plot.title = element_text(size = 9), axis.title=element_blank()) + ggtitle("Number of Fraud Trans Same Merchant")
+grid.arrange(repeat_cc, repeat_merc, ncol = 2)
+rm(repeat_cc, repeat_merc)
+```
+\  
+\  
+
+
+The trans_date_trans_time column should be explored in parts. First step is to explore transaction time.  When viewing the percentage transaction amount for each hour, after 10pm has much higher rate of fraud. 
+
+
+```{r time of fraud trans, message = FALSE, error = FALSE, warning = FALSE, fig.width = 6, fig.height = 2.25}
+# fraud transaction amt by hour
+train_set %>% mutate(trans_hour = hour(trans_date_trans_time)) %>% group_by(trans_hour, is_fraud) %>%
+  summarize(amt = sum(amt)) %>% mutate(pct_amt = (amt/sum(amt))*100) %>% filter(is_fraud == 1) %>%
+  ggplot(aes(x= trans_hour)) + geom_bar(aes(y=pct_amt, fill = pct_amt), stat = "identity") +
+  geom_text(aes(y=pct_amt, label = sprintf("%1.1f%%", pct_amt)), size = 2, nudge_y = 1) +
+  scale_x_continuous(name = "Transaction Hour", breaks=seq(0,23)) + ylab("") +  
+  scale_y_continuous(labels=function(x) paste0(x,"%"), limits = c(0,30)) + theme_bw(base_size = 9) + 
+  theme(legend.position = "none", panel.grid.minor = element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Each Hour's Fraud Amounts: Most Fraud Occurs Between 10pm & 3am")
+```
+  
+  
+When viewing daily percentage transactions by hour (where 24 hours = 100%), it is clear that fraudulent transactions are mostly perpetuated late at night, whereas legitimate transactions stay at a steady rate.  
+
+```{r hour fraud trans, message = FALSE, error = FALSE, warning = FALSE, fig.width = 6, fig.height = 2.75}
+# Legit vs fraud Amts Breakdown transaction hour
+train_set %>% mutate(trans_hour = hour(trans_date_trans_time), is_fraud = as.factor(is_fraud)) %>% group_by(is_fraud, trans_hour) %>% 
+  summarize(amt = sum(amt), n = n()) %>% mutate(pct_amt = (amt/sum(amt))*100, pct_n = (n/sum(n))*100) %>%
+  ggplot(aes(trans_hour, pct_amt, size = n, color = is_fraud)) +
+  geom_point(alpha = 1/3) + geom_text(aes(y=pct_amt, label = sprintf("%1.1f%%",pct_amt)),size = 2.5, nudge_y = 1.5) + 
+  labs(x =  "Transaction Time: Hour", y = "") +  scale_x_continuous(name = "Transaction Hour", breaks=seq(0,23)) +
+  scale_y_continuous(labels=function(x) paste0(x,"%"), limits = c(0,30)) + scale_color_manual(values = c("#999999", "#990000")) +
+  theme_bw(base_size = 9) + theme(legend.position = "bottom", panel.grid.minor = element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Breakdown Fraud Amounts by Hour of Day: Legit vs Fraud")
+# Legit vs fraud Counts Breakdown transaction hour
+train_set %>% mutate(trans_hour = hour(trans_date_trans_time), is_fraud = as.factor(is_fraud)) %>% group_by(is_fraud, trans_hour) %>% 
+  summarize(amt = sum(amt), n = n()) %>% mutate(pct_amt = (amt/sum(amt))*100, pct_n = (n/sum(n))*100) %>%
+  ggplot(aes(trans_hour, pct_n, size = n, color = is_fraud)) + 
+  geom_point(alpha = 1/3) + geom_text(aes(y=pct_n, label = sprintf("%1.1f%%",pct_n)),size = 2.5, nudge_y = 1.5) + 
+  labs(x =  "Transaction Time: Hour", y = "") + scale_x_continuous(name = "Transaction Hour", breaks=seq(0,23)) + 
+  scale_y_continuous(labels=function(x) paste0(x,"%"), limits = c(0,30)) + scale_color_manual(values = c("#999999", "#990000")) +
+  theme_bw(base_size = 9) + theme(legend.position = "bottom", panel.grid.minor = element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Breakdown Number of Transactions by Hour of Day: Legit vs Fraud")  
+``` 
+  
+  
+  
+Next date elements are broken apart to look for trends.  It is important to look for trends in fraudulent transactions within the date elements, and to check percentages of fraud vs legitimate charges in the date parts as well. Since fraud transaction amount rates are higher, I will focus of the percentage of $ amounts.  
+  
+  
+```{r fraud trans by month, message = FALSE, error = FALSE, warning = FALSE, fig.width = 5, fig.height = 2}
+# Bar(amt) & point(n) percent fraud for each month 
+train_set %>% mutate(trans_month = lubridate::month(trans_date_trans_time, label = TRUE)) %>% group_by(trans_month, is_fraud,) %>%
+  summarize(amt = sum(amt), n = n()) %>% mutate(pct_amt = (amt/sum(amt))*100, pct_n = (n/sum(n))*100) %>% filter(is_fraud == 1) %>%
+  ggplot(aes(x= trans_month)) + ylab("") + geom_bar(aes(y=pct_amt), stat = "identity", fill = "slategrey") + 
+  geom_text(aes(y=pct_amt, label=sprintf("%1.1f%%",pct_amt)), size = 3, nudge_y = 1) + geom_point(aes(y=pct_n), shape = 18) + 
+  geom_text(aes(y=pct_n, label=sprintf("%1.1f%%",pct_n)), color = "grey", size = 2.5, nudge_y = .5) + 
+  scale_y_continuous(labels=function(x) paste0(x,"%"), limits = c(0,15)) +
+  theme_bw(base_size = 9) + theme(axis.title.x=element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Each Month's Percent Fraud Transactions: $ Amount (& Counts)")
+```
+
+```{r fraud trans by month2, message = FALSE, error = FALSE, warning = FALSE, fig.width = 5, fig.height = 2.5}
+# Breakdown Trans Amt by Month: Legit vs Fraud
+train_set %>% mutate(trans_month = lubridate::month(trans_date_trans_time, label = TRUE), is_fraud = as.factor(is_fraud)) %>%
+  group_by(is_fraud, trans_month) %>% summarize(amt = sum(amt), n = n()) %>% mutate(pct_amt = (amt/sum(amt))*100) %>% 
+  ggplot(aes(trans_month, pct_amt, group = is_fraud, color = is_fraud)) + 
+  geom_line(size = .75) + geom_point() + geom_text(aes(label=sprintf("%1.1f%%",pct_amt)), size = 2.5, nudge_y = 1.5) + 
+  ylab("") + scale_color_manual(values = c("#999999", "#990000")) + scale_y_continuous(labels=function(x) paste0(x,"%"), limits = c(0,25)) +
+  theme_bw(base_size = 9) + theme(legend.position = "bottom", axis.title.x = element_blank(), panel.grid.minor = element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Breakdown Transactions by Month: Legit vs Fraud")
+```
+
+
+The percent of fraud transactions varies by month, and fraud/legitimate transactions show different trends during the year.  Next I will look for trends within the month. Are certain days of the month more likely to have fraud charges?
+
+```{r fraud by day of month, message = FALSE, error = FALSE, warning = FALSE, fig.width = 6, fig.height = 2.25}
+# Bar(amt) & point(n)  percent fraud by Day of Month 
+train_set %>% mutate(day = day(trans_date_trans_time)) %>% group_by(day, is_fraud) %>% 
+  summarize(amt = sum(amt), n = n()) %>% mutate(pct_amt = (amt/sum(amt))*100, pct_n = (n/sum(n))*100) %>% filter(is_fraud == 1) %>%
+  ggplot(aes(x= day)) +  geom_bar(aes(y=pct_amt), stat = "identity", fill = "slategrey") + 
+  geom_text(aes(y=pct_amt, label=round(pct_amt, digits =1)), size = 2.5, nudge_y = .5) +
+  geom_point(aes(y=pct_n), shape = 18) + geom_text(aes(y=pct_n, label=round(pct_n, digits = 1)), color = "grey", size = 2.5, nudge_y = .5) + 
+  scale_x_continuous(name = "Day of the Month", breaks=seq(1,31,1)) + labs(x = "", y = "") +
+  scale_y_continuous(labels=function(x) paste0(x,"%"), limits = c(0,15)) +
+  theme_bw(base_size = 9) + theme(panel.grid.minor = element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Each Day's Percent of Fraud Transactions: $ Amount (& Counts)")
+```
+
+```{r fraud by day2 , message = FALSE, error = FALSE, warning = FALSE, fig.width = 6, fig.height = 2.75}
+# Breakdown Trans Amt by Day of Month: Legit vs Fraud 
+train_set %>% mutate(day = day(trans_date_trans_time), is_fraud = as.factor(is_fraud)) %>% group_by(is_fraud, day) %>% 
+  summarize(amt = sum(amt), n = n()) %>% mutate(pct_n = (n/sum(n))*100) %>% 
+  ggplot(aes(day, pct_n, color = is_fraud, label = round(pct_n, digits = 1))) + 
+  geom_line(size = .75) + geom_text(size = 2.5, nudge_y = .5) + ylab("") + 
+  scale_x_continuous(name = "Day of the Month", breaks=seq(1,31)) + scale_color_manual(values = c("#999999", "#990000")) +
+  theme_bw(base_size = 9) + scale_y_continuous(labels=function(x) paste0(x,"%"), limits = c(0,10)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Transactions by Day of Month: Legit vs Fraud")  
+  
+```
+  
+  
+Although the transactions by day line chart is difficult to read, it does show a slight difference in the daily trends of fraud and legitimate charges. Once again legitimate transactions remain relatively steady throughout the month, but fraud dips up and down by day. Looking at weekday below, there is only slight differences between the percent of fraud by weekday. But compared with legitimate transactions, there appears to be an opposite charge trends by day of the week.
+  
+  
+```{r fraud by weekday, message = FALSE, error = FALSE, warning = FALSE, fig.width = 5, fig.height = 2.25}  
+# Bar(amt) & point(n) percent fraud by Weekday
+train_set %>% mutate(weekday = lubridate::wday(trans_date_trans_time, label = TRUE)) %>% group_by(weekday, is_fraud) %>% 
+  summarize(amt = sum(amt), n = n()) %>% mutate(pct_amt = (amt/sum(amt))*100, pct_n = (n/sum(n))*100)  %>% filter(is_fraud == 1) %>%
+  ggplot(aes(weekday)) +  geom_bar(aes(y=pct_amt), stat = "identity", fill = "slategrey") + 
+  geom_text(aes(y=pct_amt, label=sprintf("%1.1f%%",pct_amt)), size = 3, nudge_y = 1) +
+  geom_point(aes(y=pct_n), shape = 18) + geom_text(aes(y=pct_n, label=sprintf("%1.1f%%",pct_n)), color = "grey", size = 2.5, nudge_y = .75) + 
+  scale_y_continuous(labels=function(x) paste0(x,"%"), limits = c(0,20)) + ylab("") +
+  theme_bw(base_size = 9) + theme(axis.title.x=element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Each Weekday's Percent of Fraud Transactions: $ Amount (& Counts)")  
+```
+
+```{r fraud by weekday2, message = FALSE, error = FALSE, warning = FALSE, fig.width = 5, fig.height = 2.75}  
+# Breakdown Trans Amt by Weekday: Legit vs Fraud
+train_set %>% mutate(weekday = lubridate::wday(trans_date_trans_time, label = TRUE), is_fraud = as.factor(is_fraud)) %>% 
+  group_by(is_fraud, weekday) %>% summarize(amt = sum(amt), n = n()) %>% mutate(pct_amt = (amt/sum(amt))*100) %>% 
+  ggplot(aes(weekday, pct_amt, group = is_fraud, color = is_fraud)) + 
+  geom_line(size = .75) + geom_point() + geom_text(aes(label=sprintf("%1.1f%%",pct_amt)), size = 2.5, nudge_y = .9) + 
+  labs(x="",y="") + scale_color_manual(values = c("#999999", "#990000")) + 
+  scale_y_continuous(labels=function(x) paste0(x,"%"), limits = c(0,25)) + theme_bw(base_size = 9) +  
+  theme(legend.position = "bottom", panel.grid.minor = element_blank(), axis.title.x=element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Breakdown Transactions by Weekday: Legit vs Fraud")
+```
+\  
+\  
+
+Not all variables have predicting power.  For instance, neither gender nor age appear to be a good predictor.  
+
+```{r fraud by gender, message = FALSE, error = FALSE, warning = FALSE}
+# fraud by gender
+kable(train_set %>% group_by(is_fraud, gender) %>% summarize(amt = sum(amt), n = n()) %>% 
+  mutate(pct_amt = amt/sum(amt), pct_n = n/sum(n)) %>% filter(is_fraud ==1), digits = 2) %>%
+  kable_styling(font_size = 9, latex_options = "hold_position") 
+```
+\  
+
+
+```{r fraud by dob, message = FALSE, error = FALSE, warning = FALSE, fig.width = 5, fig.height = 1.75}
+# Transactions by Age: legit vs fraud
+train_set %>% 
+  ggplot(aes(dob)) + geom_histogram(bins = 40, fill = "#56B4E9") + 
+  theme_bw(base_size = 9) + theme(axis.title=element_blank(), plot.title = element_text(size = 10)) +
+  ggtitle("Fraud by Date of Birth: Legitimate Transaction vs Fraud") + facet_wrap(~is_fraud, scales = "free")
+```  
+  
+In real-life fraudulent transaction are often to merchants that are very far from the customer.  With the longitude and latitude for both the customer and the merchant, we can calculate and analyze distance.  
+
+```{r trans distance by long lat, message = FALSE, error = FALSE, warning = FALSE}
+# Load calculated trans distance between cust & merchant with longitude and latitude. 
+train_distance <- readRDS(file = "train_distance.rds")
+```
+
+
+In this synthetic dataset, all transactions are within 100 miles of the customer address, and no trend for fraud can be can be ascertained.  Transaction distances Range: Min: `r min(train_distance$trans_dist)`  Max: `r max(train_distance$trans_dist)` 
+
+```{r trans distance by fraud, message = FALSE, error = FALSE, warning = FALSE, fig.width = 5, fig.height = 2}
+# Distribution of distances
+train_distance %>% 
+  ggplot(aes(trans_dist)) + geom_histogram(bins = 40, fill = "#56B4E9") + 
+  labs(x="Miles between Customer / Merchant ", y="") + theme_bw(base_size = 9) + theme(plot.title = element_text(size = 10)) +
+  ggtitle("Transaction Distances") + facet_wrap(~is_fraud, scales = "free")
+#removing train_dist 
+rm(train_distance)
+```
+
+
+Lastly when looking at the breakdown of fraud by customer state, fraud rates are consistent with percent of accounts by state. 
+
+```{r state Pct fraud, message = FALSE, error = FALSE, warning = FALSE, fig.width = 7, fig.height = 5.75}  
+# Breakdown/Percent Fraud Sales $s by State. Small pop states have large % of their sales as fraud.  
+st_f <- train_set %>% group_by(is_fraud, state) %>% summarize(amt = sum(amt), n = n()) %>% 
+  mutate(pct_amt = (amt/sum(amt))*100, pct_n = (n/sum(n))*100) %>% filter(is_fraud ==1) %>% 
+  ggplot(aes(x=pct_amt, y = reorder(state, pct_amt), label = round(pct_amt, digits = 1))) + 
+  geom_bar(width=.8, stat = "identity", fill = "slategrey") + geom_text(size = 2.5, nudge_x = .8, alpha = 1/2) + 
+  xlim(0,20) + ylab("") + theme_bw(base_size = 9) +
+  theme(axis.title.x=element_blank(), panel.grid.major.y = element_blank(), panel.grid.minor = element_blank(), plot.title = element_text(size = 10)) + 
+  ggtitle("Breakdown Percent Fraud $s by State")
+# Breakdown/Percent Accounts by State
+st_a <- train_set %>% group_by(state) %>% summarize(accts = n_distinct(cc_num), amt = sum(amt), n = n()) %>% 
+  mutate(pct_accts = (accts/sum(accts))*100) %>%
+  ggplot(aes(x=pct_accts, y = reorder(state, pct_accts), label = round(pct_accts, digits = 1))) + 
+  geom_bar(width=.8, stat = "identity", fill = "slategrey") + geom_text(size = 2.5, nudge_x = .8, alpha = 1/2) + 
+  xlim(0,20) + ylab("") + theme_bw(base_size = 9) + 
+  theme(axis.title.x=element_blank(), panel.grid.major.y = element_blank(), panel.grid.minor = element_blank(), plot.title = element_text(size = 10)) + ggtitle("Breakdown Accounts by State")
+grid.arrange(st_f, st_a, ncol = 2)
+rm(st_f, st_a)
+```
+  
+Looking at the states with the highest fraud rates, it appears the top three are small population states. A closer inspection of Delaware's transactions shows 100% fraud and only nine transactions. The states with greater than five percent fraud have very few transactions.  
+
+```{r state fraud, message = FALSE, error = FALSE, warning = FALSE, fig.width = 6, fig.height = 2}  
+# Percent Fraud Sales $s by State. Small pop states have large % of their sales as fraud.  
+st_topf <- train_set %>% group_by(state, is_fraud) %>% summarize(amt = sum(amt), n = n()) %>% 
+  mutate(pct_amt = (amt/sum(amt))*100, pct_n = (n/sum(n))*100) %>% filter(is_fraud ==1 & pct_amt > 5) %>%
+  ggplot(aes(x=pct_amt,  y = reorder(state, pct_amt), label = round(pct_amt, digits = 1))) + 
+  geom_bar(width=.85, stat = "identity", fill = "slategrey") + geom_text(size = 2.5, nudge_x = 4) + labs(x = "", y = "") +
+  theme_bw(base_size = 9) + theme(panel.grid.minor.x = element_blank(), plot.title = element_text(size = 9)) + ggtitle("States with Highest Percentage Fraud $s")
+# Number of Transaction for States with the highest rates of fraud 
+st_topf_n <- train_set %>% group_by(state, is_fraud) %>% summarize(amt = sum(amt), n = n()) %>% 
+  mutate(pct_amt = (amt/sum(amt))*100, pct_n = (n/sum(n))*100) %>% filter(is_fraud ==1 & pct_amt > 5) %>%
+  ggplot(aes(x=n,  y = reorder(state, pct_amt), label = n)) + 
+  geom_bar(width=.85, stat = "identity", fill = "slategrey") + geom_text(size = 2.5, nudge_x = 5) + labs(x = "", y = "") +
+  theme_bw(base_size = 9) + theme(panel.grid.minor.x = element_blank(), plot.title = element_text(size = 9)) + 
+  ggtitle("Total Transactions")
+grid.arrange(st_topf, st_topf_n, ncol = 2)
+rm(st_topf_n, st_topf)
+```
+  
+A closer inspection of Delaware's transactions shows 100% fraud and only nine transactions. The states with greater than five percent fraud have very few transactions.  State would not be a good predictor. I believe I can construct an effective model with amount, category and date parts.
+
+\  
+\    
+\    
+  
+### Data Cleaning
+
+Before building the models, the dataset needs to be prepped to include the relevant predictors.  To reduce the size of the dataset, I will remove unused columns and convert the date and time elements into features. I will keep the predictors to amount, category and transaction time and date parts: hour, month, day of month, and weekday and as factors.  I will keep merchant and cc_num as possibilities. 
+
+Unfortunately, the synthetic card numbers were created fictionally which reduced their usefulness for modeling.  In reality card numbers are between 13 to 16 digits. The first digit represents the card type and digits two through six identify the institution, the final digits are unique account ids. Here the credit card numbers here are between 11 to 19 digits and do not follow this pattern.  I will change cc_num to a character variable to be handled appropriately by the algorithms.  Using unique identifiers such as account numbers can lead to over training. Since fraud is usually repeated, I believe cc_num has usable predicting power. Although a recency or frequency feature once fraud is detected might provide a better predictor, for simplicity I will keep cc_num and will fit models with and without for comparison.    
+
+To effectively train and tune models, it is necessary to partition the training set to avoid over-training.  I will use a 90/10 train/test split to use as much of the data as possible since there are so few fraudulent transactions.
+  
+  
+
+```{r data prep , error=FALSE, message=FALSE, warning=FALSE}
+# importing saved training & test sets created in .R file.  
+train2 <- readRDS(file = "train2.rds")
+test2 <- readRDS(file = "test2.rds")
+test_set <- readRDS(file = "test_set.rds")
+#Removing initial full data set 
+rm(train_set)
+```
+\  
+\newpage  
+
+
+
+## Modeling Methods 
+
+I will compare three algorithms presented in HarvardX's Machine Learning course for best for anomaly prediction: two Classification and Regression Tree (CART) models using rpart and randomForest and also a logistic regression model using glm. CART algorithms work by predicting an outcome or classification and are commonly used in fraud detection. Logistic regression models use linear regression to determine the probability of a binary outcome.  
+  
+\    
+
+**Rpart**:  
+Rpart creates a decision tree through Recursive PARTitioning to predict the class of the target variable.  Rpart repeatedly subsets predictors into non-overlapping regions (partitions) at decision nodes which create the largest and most uniform subset.  This can be described as partition $\textbf{x}$, predictor $\textit{j}$, and value $\textit{s}$ where rpart splits observations into two regions $R_{1}(\textit{j,s})$ and $R_{2}(\textit{j,s})$.  Mathematically represented as:
+$$R_{1}(\textit{j,s}) = \left \{ \textbf{x} \mid \textit{x}_{j} < \textit{s} \right \} \:\:\: and \:\:\:  R_{2}(\textit{j,s}) = \left \{ \textbf{x} \mid  \textit{x}_{j} \geq \textit{s} \right \}$$ Rpart chooses $\textit{j}$ and $\textit{s}$ which minimize the residual sum of squares (RSS). Partitioning continues until minimum value of improvement in RSS, referred to as complexity parameter (cp), is reached. Rparts cp default is .01 but can be tuned.$^{[1] [2]}$
+\  
+  
+  
+**Random Forest**:  
+RandomForest is an ensemble CART algorithm which creates large numbers of decision trees with different subsets of variables then aggregates the predictions. The algorithm builds $\textit{B}$ trees resulting in models $\textit{T}_{1}, \textit{T}_{2}, ... , \textit{T}_{B}$. For each observation randomForest, predicts $\hat{y}_{j}$ from $\textit{T}_{j}$. In a classification outcome, prediction $\hat{y}$ is the majority vote among $\hat{y}_{1},...\hat{y}_{T}$. Both the number of trees (ntree) and number of variables to use per tree (mtry) are editable parameters. The defaults are 500 trees and square root of number of variables.$^{[3] [4]}$
+  
+\    
+  
+**Logistic Regression**:  
+I will use the glm function to compute a logistic regression model which predicts the conditional probability of an outcome: $Pr(Y=1|X=\textit{x})$. To ensure the estimate is between 0 to 1, glm's family function is set l to binomial to apply the logit transformation, $g(p) = log\frac{p}{1-p}$. This will create a regression model: 
+$$g\left \{ p(\textit{x}_{1},\textit{x}_{2},..,\textit{x}_{n}) \right \} = g\left \{ Pr(Y=1\mid X_{1}=\textit{x}_{1},X_{2}=\textit{x}_{2},...,X_{n}=\textit{x}_{n}) \right \} = \beta_{0} + \beta_{1}\textit{x}_{1} + \beta_{2}\textit{x}_{2} + ... + \beta_{n}\textit{x}_{n}$$ 
+After the model fits estimates for $\beta_{0} + \beta_{1}\textit{x}_{1} + ... + \beta_{n}\textit{x}_{n}$, the predict.glm function calculates the conditional probabilities. To obtain a prediction, I must define a decision rule to produce a vector of predicted outcomes based on the threshold (such as $\hat{y}$ > .5).  
+
+Logistic regression is limited in its modeling capability.  Simply stated, glm calculates the relationship between features and outcome on a linear plane which means it cannot model non-linear relationships.$^{[5]}$  Furthermore, glm cannot handle categorical variables with many levels. Although a limited and simplistic approach, glm does allow the algorithm to model interaction between variables. Based on the above analysis, it is the relationship between category and amount appears to be the best indicator of fraud in the data. In this case the equation will change to include an coefficient for the interaction for amount and category:  $g\left \{ p(\textit{amt},cat) \right \} = \beta_{0} + \beta_{1}\textit{amt} + \beta_{2}\textit{cat} + \beta_{3}\textit{amt}\ast\textit{cat}$.  
+  
+\  
+
+Modeling Issues: I originally planned to use the caret function to train all models utilizing its cross-validation feature.  Unfortunately, with a over a million observations, caret took hours to run and did not significantly improve the model compared rpart and glm. 
+
+\newpage  
+
+
+### Model Evaluation
+
+Accuracy is a poor evaluation metric for imbalanced datasets. For instance, this dataset contains only 0.5% fraudulent transactions, even a model that predicts no fraud will have a 99.5% accuracy.  Credit card companies utilize fraud detection algorithms to prevent revenue loss. As shown during analysis, the percentage of fraud transaction amounts (the cost) is eight times higher than the number of fraud transactions. In real life, fraudulent charges also produce additional customer service costs.$^{[6]}$  Therefore, I will use a combination of confusion matrix metrics and cost analysis to evaluate model performance.  
+  
+\  
+
+Predictions have four possibilities in the following models: 
+
+  * True Positive (TP): legitimate predicted / legitimate actual transaction
+  * False Positive (FP): legitimate predicted / fraudulent actual transaction
+  * False Negative (FN): fraud predicted / legitimate actual transaction
+  * True Negative  (TN): fraud predicted / fraudulent actual transaction  
+
+\  
+
+In the confusion matrix of a fraud detection model, is_fraud = 0 is a legitimate transaction (positive outcome), and is_fraud = 1 is fraudulent (negative outcome).  
+
+```{r confusion matrix, message = FALSE, error = FALSE, warning = FALSE, fig.width = 2, fig.height = 1.25}  
+Actual <- factor(c(0,0,1,1))
+Predicted <- factor(c(0, 1, 0, 1))
+Y <- c("TP","FN","FP","TN")
+cm_df <- data.frame(Actual, Predicted, Y)
+cm_df %>% ggplot(aes(Actual,reorder(Predicted, desc(Predicted)), label = Y)) +
+  geom_tile(aes(fill =Y)) + geom_text(size =3) + scale_fill_brewer() +
+  labs(x="Actual",y="Predicted") +  theme_bw(base_size = 9) + theme(legend.position = "none")
+```
+  
+  
+Evaluation Metrics: 
+
+  * Specificity: The proportion correct fraud predictions to actual fraud, also called True Negative Rate (TNR). Specificity in an imbalanced dataset is a better metric than accuracy.   TN/(TN + FP)
+  * Negative Predictive Value (NPV): The proportion correct fraud predictions to all fraud predicted.  NPV shows if the model is incorrectly identifying legitimate transactions.   TN/(TN + FN)
+ 
+
+Costs:
+
+  * Amount Saved: Amount of fraud correctly predicted ($ TN)
+  * Fraud Missed: Amount of fraud missed ($ FP)
+  * MisClassified: Amount incorrectly predicted as fraud ($ FN)
+
+\  
+\  
+\  
+
+  
+```{r loading large models, eval = FALSE, message = FALSE, error = FALSE, warning = FALSE}
+# Run this code chunk, if you prefer to save time & load already fit models.
+#  this file contains the glm & randomForests models which take over an hour to process.
+# create temp file & url 
+dl <- tempfile()
+URL <- "https://github.com/KHHogan06/CYO-Project/releases/download/v1-files/CYO_Models.RData"
+# download url into temp file
+download.file(URL, dl)
+# load .RData into environment. This takes a few minutes.
+load(dl)
+# remove files
+rm(dl, URL)
+```
+  
+\  
+\  
+
+   
+   
+## Model Building  
+
+First I calculate lost revenue when no fraud is detected.   I will evaluate three versions of each algorithm with different variables and parameters, then choose then best performing construct of each for final evaluation.  
+\  
+
+  
+**No Fraud Predicted**: No fraud was predicted, all positive outcomes assumed. (All is_fraud = 0.)  
+
+```{r no fraud model, message = FALSE, error = FALSE, warning = FALSE}  
+# Create vector predictions containing 0 for every transfer
+predictions <- factor(rep(0, times = nrow(test2)), levels = c(0, 1))
+```
+
+```{r no fraud cm, message = FALSE, error = FALSE, warning = FALSE, include=FALSE, digits = 3}  
+# Compute accuracy
+acc <- (confusionMatrix(predictions, test2$is_fraud)$overall[["Accuracy"]])*100
+# Compute cost of not detecting fraud
+loss <- sum(test2$amt[test2$is_fraud == 1]) 
+```  
+
+The cost of not detecting fraud =  $ `r loss`.  
+Accuracy with no correct fraud predictions: `r acc` %.
+
+
+```{r no fraud cost results, error=FALSE, message=FALSE, warning=FALSE}
+# Tabling predictions
+cost_preds <- tibble(amt = test2$amt, results = test2$is_fraud, no_preds = predictions)
+# Tabling cost results
+cost_results <- tibble(Model = "No Fraud Predicted", AmtSaved = 0, FraudMissed = loss, MisClassified = 0,  
+                                SavedPct = 0, MisClassPct = 0, Specificity = 0, NPV = 0)
+# removing large element
+rm(predictions)
+```
+\  
+\  
+
+   
+### Rpart Models 
+  
+**Rpart Model 1**: To begin I will include all possible predictors and assess results and variable importance. Date and time parts are included as factors.  _Formula: rpart(is_fraud ~ ., data = train2, method = "class")_
+  
+ 
+```{r rpart model1, message = FALSE, error = FALSE, warning = FALSE}  
+# all except trans_date_trans_time
+fit_rpart_all <- train2 %>% select(-c(trans_date_trans_time)) %>%
+  rpart(is_fraud ~ ., data = ., method = "class")
+fit_rpart_all <- readRDS(file = "fit_rpart_all.rds")
+# predictions
+yhat_rpart_all <- predict(fit_rpart_all, test2, type = "class")
+```
+
+
+Rpart Model 1 Confusion Matrix:
+```{r rpart all cm, message = FALSE, error = FALSE, warning = FALSE} 
+# Confusion Matrix
+kable(confusionMatrix(yhat_rpart_all, test2$is_fraud)$table, escape = F, align = "r") %>%
+      kable_styling(font_size = 8, latex_options = "HOLD_position") 
+```
+  
+
+Rpart Model 1 Results:
+```{r rpart all results, message = FALSE, error = FALSE, warning = FALSE}  
+# Evaluating model performance 
+rp_all_Sp <- confusionMatrix(yhat_rpart_all, test2$is_fraud)$byClass["Specificity"]
+rp_all_NPV <- confusionMatrix(yhat_rpart_all, test2$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+cost_preds <- cbind(cost_preds, yhat_rpart_all)
+rp_all_saved <- cost_preds %>% filter(results == 1 & yhat_rpart_all == 1) %>% summarize(sum(amt)) %>% pull()  
+rp_all_miscl<- cost_preds %>% filter(results == 0 & yhat_rpart_all == 1) %>% summarize(sum(amt)) %>% pull()
+rp_all_miss <- cost_preds %>% filter(results == 1 & yhat_rpart_all == 0) %>% summarize(sum(amt)) %>% pull()
+rp_all_savedpct <- rp_all_saved/loss
+rp_all_misclpct <- rp_all_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "Rpart All Vars", AmtSaved = rp_all_saved, FraudMissed = rp_all_miss, MisClassified = rp_all_miscl, 
+                                     SavedPct = rp_all_savedpct, MisClassPct = rp_all_misclpct, Specificity = rp_all_Sp, NPV = rp_all_NPV))
+kable(cost_results %>% filter(Model == "Rpart All Vars"), digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "hold_position") 
+```
+
+\  
+
+The results are not very good with only 63% of fraud amounts and just over half of transactions detected. Although with 92% NPV, at least the model isn't incorrectly flagging very many legitimate transactions.  One of the benefits of Rpart is its ease of interpretability when plotting the decision tree.  Unfortunately, a model with a high level of classifiers such as this does not make a readable decision tree. Instead I will evaluate variable importance.
+
+Rpart Model 1 Variable Importance:
+```{r rpart all var_imp, message = FALSE, error = FALSE, warning = FALSE} 
+# Var importance
+kable(as.data.frame(fit_rpart_all$variable.importance), col.names = NULL) %>%
+      kable_styling(font_size = 8, latex_options = "HOLD_position")  
+``` 
+  
+I find it unlikely that merchant should top the list or that category and bins are improving the model more than amount. I suspect the high-level categorical variables are not performing well. Including a constructed feature like bins is probably inhibiting rpart's ability to calculate best splits.  
+
+\  
+
+  
+**Rpart Model 2**:  For a simpler model, I include only amount, category and date parts as factors. I am not including bins to allow rpart partitioning to calculate best split value.  
+_Formula: rpart(is_fraud ~ amount + category + hour + month + day + weekday, data = train2, method = "class")_
+
+```{r rpart model 2, message = FALSE, error = FALSE, warning = FALSE} 
+# rpart2: no cc_nums, merchant, bins, trans_date/time   
+fit_rpart <- train2 %>% select(-c(trans_date_trans_time, merchant, cc_num, bins)) %>% 
+  rpart(is_fraud ~ ., data = ., method = "class")
+# rpart2 predictions
+yhat_rpart <- predict(fit_rpart, test2, type = "class")
+ 
+```
+
+Rpart Model 2 Confusion Matrix:
+```{r rpart 2 cm, message = FALSE, error = FALSE, warning = FALSE}  
+# Confusion Matrix
+cm_rp <- as.data.frame.matrix(confusionMatrix(yhat_rpart, test2$is_fraud)$table)
+kable(cm_rp, escape = F, align = "r") %>%
+      kable_styling(font_size = 8, latex_options = "hold_position") 
+```
+  
+  
+Rpart Model 2 Results:
+```{r rpart 2 results, message = FALSE, error = FALSE, warning = FALSE}  
+# Evaluating model 2 performance 
+rp_Sp <- confusionMatrix(yhat_rpart, test2$is_fraud)$byClass["Specificity"]
+rp_NPV <- confusionMatrix(yhat_rpart, test2$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+cost_preds <- cbind(cost_preds, yhat_rpart)
+rp_saved <- cost_preds %>% filter(results == 1 & yhat_rpart == 1) %>% summarize(sum(amt)) %>% pull()  
+rp_miscl<- cost_preds %>% filter(results == 0 & yhat_rpart == 1) %>% summarize(sum(amt)) %>% pull()  
+rp_miss <- cost_preds %>% filter(results == 1 & yhat_rpart == 0) %>% summarize(sum(amt)) %>% pull() 
+rp_savedpct <- rp_saved/loss
+rp_misclpct <- rp_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "Rpart Basic", AmtSaved = rp_saved, FraudMissed = rp_miss, MisClassified = rp_miscl, 
+                                     SavedPct = rp_savedpct, MisClassPct = rp_misclpct, Specificity = rp_Sp, NPV = rp_NPV))
+kable(cost_results %>% filter(Model == "Rpart Basic"), digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "hold_position") 
+```
+\  
+
+  
+This is a significant improvement over the first model with 76% of fraud dollars predicted. With such a large dataset with high-level variables, does the complexity parameter need to be tuned to improve the model? When we plot the cp against the xerror, it does appear that we could improve the model by decreasing the complexity parameter.$^{[7]}$
+
+```{r rpart 2 cp plot, message = FALSE, error = FALSE, warning = FALSE, fig.width = 2.75, fig.height = 1.75}   
+# plotting cp/err 
+as.data.frame(fit_rpart$cptable) %>%
+  ggplot(aes(x=CP,y= xerror)) +
+  geom_point() + geom_line(color = "blue") + ylim(.35,1) + 
+  scale_x_reverse() + labs(x="complexity parameter",y="cross-validation error") + 
+  theme_bw(base_size = 8)
+```
+
+
+
+**Rpart Model 2 Tuning CP**:   I am setting minimum split and complexity parameters to zero to determine which cp value minimizes the cross-validated error (xerror), then I will prune the model accordingly with prune.rpart function. 
+_Formula: rpart(is_fraud ~ amount + category + hour + month + day + weekday, data = train2, minsplit = 0, cp = 0, method = "class")_ 
+
+```{r rpart2 cp, message = FALSE, error = FALSE, warning = FALSE, fig.width = 2.75, fig.height = 1.75} 
+# rpart2 tuning cp: no cc_nums, merchant, bins, trans_date/time   
+fit_rpartcp <- train2 %>% select(-c(trans_date_trans_time, merchant, cc_num, bins)) %>% 
+  rpart(is_fraud ~ ., data = ., minsplit = 0, cp = 0, method = "class")
+# plotting cp/err 
+as.data.frame(fit_rpartcp$cptable) %>%
+  ggplot(aes(x=CP,y= xerror)) +
+  geom_point() + geom_line(color = "blue") +  
+  scale_x_reverse() + labs(x="complexity parameter",y="cross-validation error") + 
+  theme_bw(base_size = 8)
+```
+
+It appears that the xerror is minimized much below the complexity parameter default of .01 and there are multiple xerror values below .4. Minimum xerror:
+
+```{r rpart2 cp choose, message = FALSE, error = FALSE} 
+# Saving cp table
+cptable <- as.data.frame(fit_rpartcp$cptable)
+# Increasing digits
+options(digits = 6)
+# Printing lowest xerrors
+kable(cptable %>% filter(xerror == min(xerror)), digits = 6, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "hold_position")
+```
+
+
+```{r rpart2 prune, message = FALSE, error = FALSE, warning = FALSE}
+#setting cp
+rp_cp <- fit_rpartcp$cptable[which.min(fit_rpartcp$cptable[,"xerror"]),"CP"]
+# Pruning basic rpart model   
+pfit_rpartcp <- prune.rpart(fit_rpartcp, cp=rp_cp)
+# rpart basic cp  predictions
+yhat_rpartcp <- predict(pfit_rpartcp, test2, type = "class")
+ 
+```
+\  
+
+
+Rpart Model 2 Tuned CP Confusion Matrix:
+```{r rpart2 cms compared, message = FALSE, error = FALSE, warning = FALSE}  
+# Confusion Matrix
+cm_rpcp <- as.data.frame.matrix(confusionMatrix(yhat_rpartcp, test2$is_fraud)$table)
+# combining confusion matrices
+cmrps <-cbind(cm_rp, cm_rpcp)
+# printing final cms
+kable(cmrps) %>%
+  add_header_above(c(" "=1,"Rpart Basic Model"=2,"Rpart Basic Tuned"=2)) %>%
+  kable_styling(font_size = 8, latex_options = "hold_position")
+```  
+  
+  
+Rpart Model 2 Tuned CP Results Compared:
+```{r rpart2cp results, message = FALSE, error = FALSE, warning = FALSE}  
+# Evaluating model 2 performance 
+rpcp_Sp <- confusionMatrix(yhat_rpartcp, test2$is_fraud)$byClass["Specificity"]
+rpcp_NPV <- confusionMatrix(yhat_rpartcp, test2$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+cost_preds <- cbind(cost_preds, yhat_rpartcp)
+rpcp_saved <- cost_preds %>% filter(results == 1 & yhat_rpartcp == 1) %>% summarize(sum(amt)) %>% pull()  
+rpcp_miscl<- cost_preds %>% filter(results == 0 & yhat_rpartcp == 1) %>% summarize(sum(amt)) %>% pull()  
+rpcp_miss <- cost_preds %>% filter(results == 1 & yhat_rpartcp == 0) %>% summarize(sum(amt)) %>% pull() 
+rpcp_savedpct <- rpcp_saved/loss
+rpcp_misclpct <- rpcp_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "Rpart Basic Tuned", AmtSaved = rpcp_saved, FraudMissed = rpcp_miss, MisClassified = rpcp_miscl, 
+                                     SavedPct = rpcp_savedpct, MisClassPct = rpcp_misclpct, Specificity = rpcp_Sp, NPV = rpcp_NPV))
+kable(cost_results %>% filter(Model == c("Rpart Basic","Rpart Basic Tuned")), digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "hold_position") 
+```    
+\  
+
+  
+Tuning the complexity parameter slightly improved saved amount $\approx$ \$9,000. It had a much larger impact reduced false negatives/misclassified amount by over $21,000.    
+\  
+
+
+**Rpart Model 3**: I am interested in running the model with cc_num. In most models using a unique identifier is not advised, but in this case the cc_num has thousands of observations attached to it, and due to the repeat natural of fraud charges identifying fraud on a cc_num could be a valid predictor. 
+_Formula: rpart(is_fraud ~ amount + category + hour + month + day + weekday + cc_num, data = train2, method = "class")_
+
+
+```{r rpart model cc, message = FALSE, error = FALSE, warning = FALSE} 
+# rpart3: with cc_num, no merchant, bins, trans_date
+fit_rpart_cc <- train2 %>% select(-c(trans_date_trans_time, merchant, bins)) %>% rpart(is_fraud ~ ., data = ., method = "class")
+# model 3 predictions
+yhat_rpart_cc <- predict(fit_rpart_cc , test2, type = "class")
+```
+ 
+
+  
+Rpart Model 2 & 3 Confusion Matrix Compared:
+```{r rpart cc cm, message = FALSE, error = FALSE, warning = FALSE}  
+# Confusion Matrix
+cm_rpcc <- as.data.frame.matrix(confusionMatrix(yhat_rpart_cc, test2$is_fraud)$table)
+# combining confusion matrices
+cmrps2 <-cbind(cm_rp, cm_rpcc)
+# printing final cms
+kable(cmrps2) %>%
+  add_header_above(c(" "=1,"Rpart Basic Model"=2,"Rpart with CCs"=2)) %>%
+  kable_styling(font_size = 8, latex_options = "HOLD_position")
+```
+  
+  
+Rpart Model 2 & 3 Results Compared:
+```{r rpart cc results, message = FALSE, error = FALSE, warning = FALSE} 
+# Evaluating model 3 performance
+rp_cc_Sp <- confusionMatrix(yhat_rpart_cc, test2$is_fraud)$byClass["Specificity"]
+rp_cc_NPV <- confusionMatrix(yhat_rpart_cc, test2$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+cost_preds <- cbind(cost_preds, yhat_rpart_cc)
+rp_cc_saved <- cost_preds %>% filter(results == 1 & yhat_rpart_cc == 1) %>% summarize(sum(amt)) %>% pull()  
+rp_cc_miscl<- cost_preds %>% filter(results == 0 &  yhat_rpart_cc == 1) %>% summarize(sum(amt)) %>% pull()  
+rp_cc_miss <- cost_preds %>% filter(results == 1 & yhat_rpart_cc == 0) %>% summarize(sum(amt)) %>% pull()  
+rp_cc_savedpct <- rp_cc_saved/loss
+rp_cc_misclpct <- rp_cc_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "Rpart w CCs", AmtSaved = rp_cc_saved, FraudMissed = rp_cc_miss, MisClassified = rp_cc_miscl, 
+                                     SavedPct = rp_cc_savedpct, MisClassPct = rp_cc_misclpct, Specificity = rp_cc_Sp, NPV = rp_cc_NPV))
+kable(cost_results %>% filter(Model == c("Rpart Basic","Rpart w CCs")), digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "hold_position") 
+```
+  
+The rpart model with credit card numbers performed close to but not as good as the basic model.  Plotting the complexity parameter again, shows the error was still decreasing when the cp parameter was reached. 
+
+```{r rpart cp plot, message = FALSE, error = FALSE, warning = FALSE,fig.width = 2.75, fig.height = 1.75} 
+# plotting cp/err 
+as.data.frame(fit_rpart_cc$cptable) %>%
+  ggplot(aes(x=CP,y= xerror)) +
+  geom_point() + geom_line(color = "blue") + ylim(.4,1) + 
+  scale_x_reverse() + labs(x="complexity parameter",y="cross-validation error") + 
+  theme_bw(base_size = 8)
+```
+\  
+
+  
+**Rpart Model 3 Tuning CP**:   Reruning model with with minimum split and complexity parameters to zero to determine which cp value minimizes the cross-validated error (xerror), then using new cp value to pruning with prune.rpart.   _Formula: rpart(is_fraud ~ amount + category + hour + month + day + weekday + cc_num, data = train2, minsplit = 0, cp = 0, method = "class")_  
+
+```{r rpart cc cp tuned, message = FALSE, error = FALSE, warning = FALSE, fig.width = 2.75, fig.height = 1.75} 
+# rpart3 tuning cp: no cc_nums, merchant, bins, trans_date/time   
+fit_rpartcp_cc <- train2 %>% select(-c(trans_date_trans_time, merchant, bins)) %>% 
+  rpart(is_fraud ~ ., data = ., minsplit = 0, cp = 0, method = "class")
+# plotting cp/err 
+as.data.frame(fit_rpartcp_cc$cptable) %>%
+  ggplot(aes(x=CP,y= xerror)) +
+  geom_point() + geom_line(color = "blue") + ylim(.35,1) + 
+  scale_x_reverse() + labs(x="complexity parameter",y="cross-validation error") + 
+  theme_bw(base_size = 8)
+# setting cp
+rpcp_cc <- fit_rpartcp_cc$cptable[which.min(fit_rpartcp_cc$cptable[,"xerror"]),"CP"]
+```
+
+```{r rpart3 prune, message = FALSE, error = FALSE, warning = FALSE}
+# Pruning rpart cc model   
+pfit_rpartcp_cc <- prune.rpart(fit_rpartcp_cc, cp=rpcp_cc)
+# rpart cc cp  predictions
+yhat_rpartcp_cc <- predict(pfit_rpartcp_cc, test2, type = "class")
+```
+\  
+
+Rpart Model 3 CP Tuned Confusion Matrix Compared:
+```{r rpart cc tuned cm, message = FALSE, error = FALSE, warning = FALSE}  
+# Confusion Matrix
+cm_rpcp_cc <- as.data.frame.matrix(confusionMatrix(yhat_rpartcp_cc, test2$is_fraud)$table)
+# combining confusion matrices
+cmrps3 <-cbind(cm_rpcc, cm_rpcp_cc)
+# printing final cms
+kable(cmrps3) %>%
+  add_header_above(c(" "=1,"Rpart with CCs"=2,"Rpart CCs Tuned"=2)) %>%
+  kable_styling(font_size = 8, bootstrap_options = "bordered", latex_options = "HOLD_position")
+```
+
+
+```{r rpartcc tuned, message = FALSE, error = FALSE, warning = FALSE} 
+# Model 3 cp Metrics
+rpcp_cc_Sp <- confusionMatrix(yhat_rpartcp_cc, test2$is_fraud)$byClass["Specificity"]
+rpcp_cc_NPV <- confusionMatrix(yhat_rpartcp_cc, test2$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+cost_preds <- cbind(cost_preds, yhat_rpartcp_cc)
+rpcp_cc_saved <- cost_preds %>% filter(results == 1 & yhat_rpartcp_cc == 1) %>% summarize(sum(amt)) %>% pull()  
+rpcp_cc_miscl<- cost_preds %>% filter(results == 0 & yhat_rpartcp_cc == 1) %>% summarize(sum(amt)) %>% pull()  
+rpcp_cc_miss <- cost_preds %>% filter(results == 1 & yhat_rpartcp_cc == 0) %>% summarize(sum(amt)) %>% pull() 
+rpcp_cc_savedpct <- rpcp_cc_saved/loss
+rpcp_cc_misclpct <- rpcp_cc_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "Rpart CCs Tuned", AmtSaved = rpcp_cc_saved, FraudMissed = rpcp_cc_miss, MisClassified = rpcp_cc_miscl, 
+                                     SavedPct = rpcp_cc_savedpct, MisClassPct = rpcp_cc_misclpct, Specificity = rpcp_cc_Sp, NPV = rpcp_cc_NPV))
+kable(cost_results %>% filter(Model == c("Rpart w CCs","Rpart CCs Tuned")), digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "HOLD_position") 
+```
+  
+  
+The tuned model with card numbers performed the best of the three catching 78% of fraudulent charged amounts. Not all predictors improved rparts performance and default complexity parameter did not perform best.  I will use this rpart model with cc_nums for final validation and model comparison.  
+
+  
+
+```{r final validation set up, message = FALSE, error = FALSE, warning = FALSE}
+### Final Validation Set Up 
+# Compute cost of not detecting fraud
+cost <- sum(test_set$amt[test_set$is_fraud == 1]) 
+# tabling results & amounts
+final_preds <- tibble(amt = test_set$amt, results = test_set$is_fraud)
+# Tabulating final cost results
+final_results <- tibble(Model = "No Fraud Predicted", AmtSaved = 0, FraudMissed = cost, MisClassified = 0, 
+                        SavedPct = 0, MisClassPct = 0, Specificity = 0, NPV = 0)
+```
+
+
+
+```{r final validation Rpart, message = FALSE, error = FALSE, warning = FALSE}
+###  Final Validation: Rpart w CC's CP Tuned   
+# rpart cc cp  predictions
+yhat_rpartcp_cc <- predict(pfit_rpartcp_cc, test_set, type = "class")
+# Evaluating model performance
+cm_rpart <- as.data.frame.matrix(confusionMatrix(yhat_rpartcp_cc, test_set$is_fraud)$table)
+rp_Sp <- confusionMatrix(yhat_rpartcp_cc, test_set$is_fraud)$byClass["Specificity"]
+rp_NPV <- confusionMatrix(yhat_rpartcp_cc, test_set$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+final_preds <- cbind(final_preds, yhat_rpartcp_cc)
+rp_saved <- final_preds %>% filter(results == 1 & yhat_rpartcp_cc == 1) %>% summarize(sum(amt)) %>% pull()  
+rp_miscl<- final_preds %>% filter(results == 0 & yhat_rpartcp_cc == 1) %>% summarize(sum(amt)) %>% pull()
+rp_miss <- final_preds %>% filter(results == 1 & yhat_rpartcp_cc == 0) %>% summarize(sum(amt)) %>% pull()
+rp_savedpct <- rp_saved/cost
+rp_misclpct <- rp_miscl/cost
+# Saving results
+final_results <- bind_rows(final_results,
+                          data_frame(Model = "Rpart CCs Tuned", AmtSaved = rp_saved, FraudMissed = rp_miss, MisClassified = rp_miscl, 
+                                     SavedPct = rp_savedpct, MisClassPct = rp_misclpct, Specificity = rp_Sp, NPV = rp_NPV))
+# removing rpart variables
+rm(rp_all_NPV, rp_all_Sp, rp_all_saved, rp_all_miscl, rp_all_miss, rp_all_savedpct, rp_all_misclpct,
+   rp_NPV, rp_Sp, rp_saved, rp_miscl, rp_miss, rp_savedpct, rp_misclpct,
+   rpcp_NPV, rpcp_Sp, rpcp_saved, rpcp_miscl, rpcp_miss, rpcp_savedpct, rp_cp, rpcp_misclpct,
+   rp_cc_NPV, rp_cc_Sp, rp_cc_saved, rp_cc_miscl, rp_cc_miss, rp_cc_savedpct,  rp_cc_misclpct,
+   rpcp_cc_NPV, rpcp_cc_Sp, rpcp_cc_saved, rpcp_cc_miscl, rpcp_cc_miss, rpcp_cc_savedpct, rpcp_cc, rpcp_cc_misclpct,
+   cm_rp, cm_rp, cm_rpcc, cmrps, cmrps2, cmrps3, cp_table,
+   yhat_rpart_all, yhat_rpart, yhat_rpartcp, yhat_rpart_cc, yhat_rpartcp_cc)
+# Removing rpart models to clear space
+rm(fit_rpart_all, fit_rpart, fit_rpartcp, pfit_rpartcp, fit_rpart_cc, fit_rpartcp_cc, pfit_rpartcp_cc)
+```
+\  
+\  
+
+  
+  
+### GLM Models  
+
+To begin I am comparing two models to emphasize the limitations of glm models in machine learning. Since glm cannot handle high levels of categorical variables, merchant and cc numbers cannot be used. With glm models, first we create the fit model then calculate probability estimates with: _predict.glm(fit_glm, test2, type = "response")_ and finally create a vector of predicted outcomes based on a threshold.  
+\  
+
+
+**GLM Model 1**: The first model will include amount and category interaction plus date parts as factors. It does not include the additional calculated bins variable. Predicted outcomes based on the threshold > .5.  _Formula: glm(is_fraud ~ amount * category + hour + month + day + weekday, data = train2, family = "binomial")_.  
+
+```{r glm model 1,  message = FALSE, error = FALSE, warning = FALSE}
+# glm model 1: category/amt interaction, date parts as factors. 
+# fit_glm1 <- train2 %>% glm(is_fraud ~ category * amt + trans_hour + day + month + weekday, data=., family = "binomial")
+# Load fit_glm1 saved from .R file. 
+## Can skip line below if loaded models from github.
+fit_glm1 <- readRDS(file = "fit_glm1.rds")
+# glm1 estimates
+phat_glm1 <- predict.glm(fit_glm1, test2, type = "response")
+# glm1 predictions
+yhat_glm1 <- ifelse(phat_glm1 > .5, 1, 0) %>% factor()
+```
+  
+  
+**GLM Model 2**: The second model will be a multivariate linear model including our calculated feature bins but not modeling for any interaction. _Formula: glm(is_fraud ~ amount + category + bins + hour + month + day + weekday, data = train2, family = "binomial")_.  
+
+```{r glm model 2,  message = FALSE, error = FALSE, warning = FALSE}
+# glm model 2: with bins, no interactions date parts as factors. 
+# fit_glm2 <- train2 %>% glm(is_fraud ~ category + amt + bins + trans_hour + day + month + weekday, data=., family = "binomial")
+# Load fit_glm2 saved from .R file. 
+## Can skip line below if loaded models from github.
+fit_glm2 <- readRDS(file = "fit_glm2.rds")
+# glm2 estimates
+phat_glm2 <- predict.glm(fit_glm2, test2, type = "response")
+# glm2 predictions
+yhat_glm2 <- ifelse(phat_glm2 > .5, 1, 0) %>% factor()
+```
+\  
+
+GLM Models 1 & 2 Confusion Matrix:
+```{r glm 1&2 cm, message = FALSE, error = FALSE, warning = FALSE}  
+# Confusion Matrices
+cm_glm1 <- as.data.frame.matrix(confusionMatrix(yhat_glm1, test2$is_fraud)$table)
+cm_glm2 <- as.data.frame.matrix(confusionMatrix(yhat_glm2, test2$is_fraud)$table)
+# combining confusion matrices
+cmglms1 <-cbind(cm_glm1, cm_glm2)
+# printing model1 & 2 cms
+kable(cmglms1) %>%
+  add_header_above(c(" "=1,"GLM cat*amt"=2,"GLM cat+amt+bins"=2)) %>%
+  kable_styling(font_size = 8, bootstrap_options = "bordered", latex_options = "HOLD_position")
+```
+  
+  
+GLM Models 1 & 2 Results:
+```{r glm 1&2 results, message = FALSE, error = FALSE, warning = FALSE}  
+# Evaluating model performance 
+glm1_Sp <- confusionMatrix(yhat_glm1, test2$is_fraud)$byClass["Specificity"]
+glm1_NPV <- confusionMatrix(yhat_glm1, test2$is_fraud)$byClass["Neg Pred Value"]
+glm2_Sp <- confusionMatrix(yhat_glm2, test2$is_fraud)$byClass["Specificity"]
+glm2_NPV <- confusionMatrix(yhat_glm2, test2$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model 1 Costs
+cost_preds <- cbind(cost_preds, yhat_glm1, yhat_glm2)
+glm1_saved <- cost_preds %>% filter(results == 1 & yhat_glm1 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm1_miscl<- cost_preds %>% filter(results == 0 &  yhat_glm1 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm1_miss <- cost_preds %>% filter(results == 1 & yhat_glm1 == 0) %>% summarize(sum(amt)) %>% pull()  
+glm1_savedpct <- glm1_saved/loss
+glm1_misclpct <- glm1_miscl/loss
+# Saving Model 1 results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "GLM cat*amt", AmtSaved = glm1_saved, FraudMissed = glm1_miss, MisClassified = glm1_miscl, 
+                                     SavedPct = glm1_savedpct, MisClassPct = glm1_misclpct, Specificity = glm1_Sp, NPV = glm1_NPV))
+# Calculating Model 2 Costs
+glm2_saved <- cost_preds %>% filter(results == 1 & yhat_glm2 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm2_miscl<- cost_preds %>% filter(results == 0 &  yhat_glm2 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm2_miss <- cost_preds %>% filter(results == 1 & yhat_glm2 == 0) %>% summarize(sum(amt)) %>% pull()  
+glm2_savedpct <- glm2_saved/loss
+glm2_misclpct <- glm2_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "GLM cat+amt+bins", AmtSaved = glm2_saved, FraudMissed = glm2_miss, MisClassified = glm2_miscl, 
+                                     SavedPct = glm2_savedpct, MisClassPct = glm2_misclpct, Specificity = glm2_Sp, NPV = glm2_NPV))
+kable(cost_results %>% filter(Model == c("GLM cat*amt","GLM cat+amt+bins")), digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "HOLD_position") 
+# removing large elements 
+rm(glm1_NPV, glm1_Sp, glm1_saved, glm1_miscl, glm1_miss, glm1_savedpct, glm1_misclpct,
+   glm2_NPV, glm2_Sp, glm2_saved, glm2_miscl, glm2_miss, glm2_savedpct, glm2_misclpct,
+   phat_glm1, yhat_glm1, phat_glm2, yhat_glm2, fit_glm1, fit_glm2)
+```
+  
+  
+Model 1, even with interaction between category and amount, did not perform very well. Model 2 without interaction performed better when I introduced a feature to capture the differences in fraud amounts in different categories. Linear models will only estimate relationships of the features provided. Rpart performed better without the added bin construct because the algorithm calculates its own splits. For glm we must know our data well and provide appropriate predictors that best fit the algorithm and data structure.  
+\  
+  
+  
+**GLM Model 3**: This model will include amount/category/bin interaction plus date parts as factors.  I will evaluate the model's estimates at thresholds of .5 and .4 to compare results.  _Formula: glm(is_fraud ~ amount * category * bins + hour + month + day + weekday, data = train2, family = "binomial")_. 
+ 
+```{r glm model3,  message = FALSE, error = FALSE, warning = FALSE}  
+# glm model 3: with category/amt/bins interaction & date parts as factors. 
+# fit_glm_bins <- train2 %>% glm(is_fraud ~ category * amt * bins + trans_hour + day + month + weekday, data=., family = "binomial")
+# Load fit_glm_bins saved from .R file. 
+## Can skip line below if loaded models from github..
+fit_glm_bins <- readRDS(file = "fit_glm_bins.rds")
+# glm3 estimates
+phat_glm_bins <- predict.glm(fit_glm_bins, test2, type = "response")
+# glm3 predictions at .5
+yhat_glm_bins.5 <- ifelse(phat_glm_bins > .5, 1, 0) %>% factor()
+# glm3 predictions at .5
+yhat_glm_bins.4 <- ifelse(phat_glm_bins > .4, 1, 0) %>% factor()
+```
+\  
+
+
+GLM Model 3 Confusion Matrix:
+```{r glm3 cms, message = FALSE, error = FALSE, warning = FALSE}  
+# Confusion Matrices
+cm_glmb.5 <- as.data.frame.matrix(confusionMatrix(yhat_glm_bins.5, test2$is_fraud)$table)
+cm_glmb.4 <- as.data.frame.matrix(confusionMatrix(yhat_glm_bins.4, test2$is_fraud)$table)
+# combining confusion matrices
+cmglms2 <-cbind(cm_glmb.5, cm_glmb.4)
+# printing model1 & 2 cms
+kable(cmglms2) %>%
+  add_header_above(c(" "=1,"GLM cat*amt*bins > .5"=2,"GLM cat*amt*bins > .4"=2)) %>%
+  kable_styling(font_size = 8, bootstrap_options = "bordered", latex_options = "HOLD_position")
+```
+  
+  
+GLM Model 3 Results:
+```{r glm 3 results, message = FALSE, error = FALSE, warning = FALSE}  
+# Evaluating model 3 performance 
+glm.5_Sp <- confusionMatrix(yhat_glm_bins.5, test2$is_fraud)$byClass["Specificity"]
+glm.5_NPV <- confusionMatrix(yhat_glm_bins.5, test2$is_fraud)$byClass["Neg Pred Value"]
+glm.4_Sp <- confusionMatrix(yhat_glm_bins.4, test2$is_fraud)$byClass["Specificity"]
+glm.4_NPV <- confusionMatrix(yhat_glm_bins.4, test2$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model 3 >.5 Costs
+cost_preds <- cbind(cost_preds, yhat_glm_bins.5, yhat_glm_bins.4)
+glm.5_saved <- cost_preds %>% filter(results == 1 & yhat_glm_bins.5 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm.5_miscl <- cost_preds %>% filter(results == 0 & yhat_glm_bins.5 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm.5_miss <- cost_preds %>% filter(results == 1 & yhat_glm_bins.5 == 0) %>% summarize(sum(amt)) %>% pull() 
+glm.5_savedpct <- glm.5_saved/loss
+glm.5_misclpct <- glm.5_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "Glm bins >.5", AmtSaved = glm.5_saved, FraudMissed = glm.5_miss, MisClassified = glm.5_miscl, 
+                                     SavedPct = glm.5_savedpct, MisClassPct = glm.5_misclpct, Specificity = glm.5_Sp, NPV = glm.5_NPV))
+# Calculating Model 3 >.4 Costs
+glm.4_saved <- cost_preds %>% filter(results == 1 & yhat_glm_bins.4 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm.4_miscl <- cost_preds %>% filter(results == 0 & yhat_glm_bins.4 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm.4_miss <- cost_preds %>% filter(results == 1 & yhat_glm_bins.4 == 0) %>% summarize(sum(amt)) %>% pull() 
+glm.4_savedpct <- glm.4_saved/loss
+glm.4_misclpct <- glm.4_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "Glm bins >.4", AmtSaved = glm.4_saved, FraudMissed = glm.4_miss, MisClassified = glm.4_miscl, 
+                                     SavedPct = glm.4_savedpct, MisClassPct = glm.4_misclpct,  Specificity = glm.4_Sp, NPV = glm.4_NPV))
+# Printing Models results
+kable(cost_results %>% filter(Model == c("Glm bins >.5","Glm bins >.4")), digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "HOLD_position") 
+# Removing large elements
+rm(phat_glm_bins, yhat_glm_bins.5, yhat_glm_bins.4)
+```
+  
+
+Reducing the probability threshold increased the number of correct fraud predictions and saved about $11,000 more, but it increased false positives by $12,000.  This is where companies must decide on a trade-off. Is it better to catch more fraud at the risk of  denying some legitimate transactions and possibly upsetting customers and losing the sale.  With today's automation banks can send a text allowing the cardholder to approve or deny the suspicious transaction. I would think this makes the false positives preferable over false negatives.  
+
+
+```{r glm final valid,  message = FALSE, error = FALSE, warning = FALSE}
+## GLM Model 3 for final validation:
+# Predictions
+phat_glm_bins <- predict.glm(fit_glm_bins, test_set, type = "response")
+yhat_glm_bins.4 <- ifelse(phat_glm_bins > .4, 1, 0) %>% factor()
+# Evaluating model performance
+cm_glm <- as.data.frame.matrix(confusionMatrix(yhat_glm_bins.4, test_set$is_fraud)$table)
+glm_bins_Sp <- confusionMatrix(yhat_glm_bins.4, test_set$is_fraud)$byClass["Specificity"]
+glm_bins_NPV <- confusionMatrix(yhat_glm_bins.4, test_set$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+final_preds <- cbind(final_preds, yhat_glm_bins.4)
+glm_bins_saved <- final_preds %>% filter(results == 1 & yhat_glm_bins.4 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm_bins_miscl<- final_preds %>% filter(results == 0 & yhat_glm_bins.4 == 1) %>% summarize(sum(amt)) %>% pull()  
+glm_bins_miss <- final_preds %>% filter(results == 1 & yhat_glm_bins.4 == 0) %>% summarize(sum(amt)) %>% pull()
+glm_bins_savedpct <- glm_bins_saved/cost
+glm_bins_misclpct <- glm_bins_miscl/cost
+# Saving results
+final_results <- bind_rows(final_results,
+                          data_frame(Model = "Glm amt*cat*bins >.4", AmtSaved = glm_bins_saved, FraudMissed = glm_bins_miss, MisClassified = glm_bins_miscl, 
+                                           SavedPct = glm_bins_savedpct, MisClassPct = glm_bins_misclpct, Specificity = glm_bins_Sp, NPV = glm_bins_NPV))
+# removing glm saved values
+rm(glm.5_NPV, glm.5_Sp, glm.5_saved, glm.5_miscl, glm.5_miss, glm.5_savedpct, glm.5_misclpct,
+   glm.4_NPV, glm.4_Sp, glm.4_saved, glm.4_miscl, glm.4_miss, glm.4_savedpct, glm.4_misclpct,
+   glm_bins_NPV, glm_bins_Sp, glm_bins_saved, glm_bins_miscl, glm_bins_miss, glm_bins_savedpct, glm_bins_misclpct,
+   cmglms1, cm_glm1, cm_glm2, cm_glmb.4, cm_glmb.5, cmglms2)
+#removing models 
+rm(phat_glm_bins, fit_glm_bins, yhat_glm_bins.4)
+```  
+\  
+\  
+
+  
+  
+### RandomForest Models  
+  
+**RandomForest Model 1**: The main tuning parameters for random forest are the number of trees (ntree) and the number of variables to sample per tree (mtry). RandomForest defaults to 500 trees and the square root of the number of columns in the formula.  Sampling can be done with or without replacement although with replacement will generate more randomness. Due to machine memory limits, I decided to start with a very low number of trees (51) but kept the default variable parameter.  
+_Formula: randomForest(is_fraud ~ ., data = train2, ntree = 51, replacement = TRUE, importance = TRUE)_
+
+```{r randomForest model 1, message = FALSE, error = FALSE, warning = FALSE}
+# Resetting seed
+set.seed(1, sample.kind="Rounding")
+# Random Forest Model 1 51 trees    
+# fit_rf51 <- train2 %>% randomForest(is_fraud ~., data = ., ntree = 51, replacement = TRUE, importance = TRUE)
+# Load fit_rf51 from .R file. 
+## Can skip line below if loaded models from github.
+fit_rf51 <- readRDS(file = "fit_rf51.rds")
+# Making rf 51 trees predictions
+yhat_rf51 <- predict(fit_rf51, test2, type = "class")
+```
+\  
+
+RandomForest Model 1 Confusion Matrix:
+```{r rf51 model cm, message = FALSE, error = FALSE, warning = FALSE}  
+# Confusion Matrix
+kable(confusionMatrix(yhat_rf51, test2$is_fraud)$table, escape = F, align = "r") %>%
+      kable_styling(font_size = 8, latex_options = "HOLD_position") 
+```
+  
+RandomForest Model 1 Results: 
+```{r rf51 model results, message = FALSE, error = FALSE, warning = FALSE}  
+# Evaluating model  performance
+rf51_Sp <- confusionMatrix(yhat_rf51, test2$is_fraud)$byClass["Specificity"]
+rf51_NPV <- confusionMatrix(yhat_rf51, test2$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+cost_preds <- cbind(cost_preds, yhat_rf51)
+rf51_saved <- cost_preds %>% filter(results == 1 & yhat_rf51 == 1) %>% summarize(sum(amt)) %>% pull()  
+rf51_miscl<- cost_preds %>% filter(results == 0 & yhat_rf51 == 1) %>% summarize(sum(amt)) %>% pull()  
+rf51_miss <- cost_preds %>% filter(results == 1 & yhat_rf51 == 0) %>% summarize(sum(amt)) %>% pull()   
+rf51_savedpct <- rf51_saved/loss
+rf51_misclpct <- rf51_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "RandomForest 51", AmtSaved = rf51_saved, FraudMissed = rf51_miss, MisClassified = rf51_miscl, 
+                                     SavedPct = rf51_savedpct, MisClassPct = rf51_misclpct, Specificity = rf51_Sp, NPV = rf51_NPV))
+kable(cost_results %>% filter(Model == "RandomForest 51"), digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "HOLD_position") 
+```
+  
+   
+The first randomForest model performed extremely well even with only 51 trees. Plotting the error rate by class vs number of trees to see if there is room for improvement.$^{[8]}$ 
+  
+  
+```{r rf51 err.rate, include = FALSE, message = FALSE, error = FALSE, warning = FALSE}  
+# Get OOB data from plot and coerce to data.table
+oobData <- as.data.table(plot(fit_rf51))
+# Define trees as 1:ntree
+oobData[, trees := .I]
+# min OOB & fraud class Error at mtry 3
+Mtry3_OOBErr <- min(oobData$OOB)*100
+Mtry3_FraudErr <- min(oobData$'1')*100
+# Cast to long format
+oobData <- melt(oobData, id.vars = "trees")
+setnames(oobData, "value", "error")
+```
+  
+```{r rf51 plotting error, message = FALSE, error = FALSE, warning = FALSE, fig.width = 5, fig.height = 1.75}  
+# plotting trees / error
+oobData %>% ggplot(aes(x = trees, y = error)) + geom_line(color = "blue") + 
+  theme_bw(base_size = 8) + theme(plot.title = element_text(size=9)) + ggtitle("Out-of-Bag & Class Errors by Number of Trees") + 
+  facet_wrap(~variable, scales = "free") 
+```  
+  
+  
+At Mtry = 3 the minimum OOBError = `r Mtry3_OOBErr` % and Fraud Class Error = `r Mtry3_FraudErr` %.  I want to look at error rates for higher values of mtry to see if I can improve the results.  In an imbalanced dataset, as with accuracy, OOB error is not particularly helpful as it is skewed to the majority class. In the graph above, legitimate transactions are flattening out around 30 trees, but the fraud class is still declining and has a much higher error rate.  
+\  
+
+**RandomForest Model 1 Tuning Mtry**:   I will use the the tuneRF function.  TuneRF takes a starting mtry input and returns the OOB error for a step factor above and below. I am increasing the number of trees slightly.  _tuneRF(train2[-6], train2$is_fraud, mtryStart = 5, ntreeTry = 75, stepFactor = .9)_  
+\  
+
+  
+```{r rf51 tuning mtry, include = FALSE, message = FALSE, error = FALSE, warning = FALSE}
+# Tuning RF Model for best mtry value 4-6. Using 75 trees. This takes a long time! 
+# rf_tune <- tuneRF(train2[-6], train2$is_fraud, mtryStart = 5, ntreeTry = 75, stepFactor = .9)  
+# Load rf_tune saved from .R file. 
+## Can skip line below if loaded models from github.
+rf_tune <- readRDS(file = "rf_tune.rds")
+```
+
+
+```{r plotting tune rf, message = FALSE, error = FALSE, warning = FALSE, fig.width = 3, fig.height = 1.75}
+# setting digits large enough to show diff
+options(digits = 6)
+as.data.frame(rf_tune) %>% mutate(OOBError = OOBError*100) %>%
+  ggplot(aes(x=mtry, y = OOBError)) +
+  geom_point() + geom_line(color = "blue") + ylim(.2,.21) +
+  geom_text(aes(label=sprintf("%1.3f%%",OOBError)), size = 2.5,  nudge_y = .001,alpha =3/4) +
+   scale_x_continuous(breaks=c(4,5,6))+ theme_bw(base_size = 8) + 
+   theme(plot.title = element_text(size=9)) + ggtitle("OOB Error Rate by Mtry Value")
+# Removing large element
+rm(yhat_rf51, fit_rf51, oobData)
+```
+  
+  
+In actuality, I am more interested in the err.rate for fraud class and the cost results than the OOB Error, but this does show that different values of mtry do perform better than the default. Using more trees would produce better results, but TuneRF is a very time consuming function.  Since the OOBError value changes only at the hundredth of a percent, these models should produce very similar values.  Using a smaller number of predictors is supposed to allow randomForest to pick up trends between predictors that would be less noticeable with the full set. Unfortunately, due to technical restrictions, I am limited on the number of trees I can run and this will inhibit performance and also re-producibility of results. I will train the next randomForest model, with 251 trees (just over half of the default) and use mtry = 4.  
+\  
+\  
+
+
+**RandomForest Model 2**: Model was fit for 251 decision trees, sampling four out of ten features:  amount, category, bins, factored date/time parts, and full trans_date_trans_time.  
+_Formula: randomForest(is_fraud ~ ., data = train2, ntree = 251, mtry = 4, replacement = TRUE, importance = TRUE)_
+
+```{r randomForest model 2, message = FALSE, error = FALSE, warning = FALSE}
+# Random Forest Model 2: 251 trees, 4/10 predictors. 
+# fit_rf251 <- train2 %>% randomForest(is_fraud ~., data = ., ntree = 251, mtry = 4, replacement = TRUE, importance = TRUE)
+# Load fit_rf251 saved from .R file.
+## Can skip line below if loaded models from github.
+fit_rf251 <- readRDS(file = "fit_rf251.rds")
+# rf 251 trees predictions
+yhat_rf251 <- predict(fit_rf251, test2, type = "class")
+```
+\  
+
+RandomForest Model 2 Confusion Matrix:
+```{r rf251 model cm, message = FALSE, error = FALSE, warning = FALSE}  
+# Confusion Matrix
+kable(confusionMatrix(yhat_rf251, test2$is_fraud)$table, escape = F, align = "r") %>%
+      kable_styling(font_size = 8, latex_options = "hold_position")
+```
+  
+RandomForest Model 1 & 2 Results:
+```{r rf251 model results, message = FALSE, error = FALSE, warning = FALSE}  
+# Evaluating model performance 
+rf251_Sp <- confusionMatrix(yhat_rf251, test2$is_fraud)$byClass["Specificity"]
+rf251_NPV <- confusionMatrix(yhat_rf251, test2$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+cost_preds <- cbind(cost_preds, yhat_rf251)
+rf251_saved <- cost_preds %>% filter(results == 1 & yhat_rf251 == 1) %>% summarize(sum(amt)) %>% pull()  
+rf251_miscl<- cost_preds %>% filter(results == 0 & yhat_rf251 == 1) %>% summarize(sum(amt)) %>% pull()  
+rf251_miss <- cost_preds %>% filter(results == 1 & yhat_rf251 == 0) %>% summarize(sum(amt)) %>% pull()   
+rf251_savedpct <- rf251_saved/loss
+rf251_misclpct <- rf251_miscl/loss
+# Saving results
+cost_results <- bind_rows(cost_results,
+                          data_frame(Model = "RandomForest 251", AmtSaved = rf251_saved, FraudMissed = rf251_miss, MisClassified = rf251_miscl, 
+                                     SavedPct = rf251_savedpct, MisClassPct = rf251_misclpct, Specificity = rf251_Sp, NPV = rf251_NPV))
+kable(cost_results %>% filter(Model == c("RandomForest 51","RandomForest 251")), digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "hold_position") 
+# Removing large element
+rm(yhat_rf251)
+```
+  
+```{r rf251 err.rate, include = FALSE, message = FALSE, error = FALSE, warning = FALSE}  
+# Get OOB data from plot and coerce to data.table
+oobData251 <- as.data.table(plot(fit_rf251))
+# Define trees as 1:ntree
+oobData251[, trees := .I]
+# Cast to long format
+oobData251 <- melt(oobData251, id.vars = "trees")
+setnames(oobData251, "value", "error")
+```    
+  
+  
+  
+Not surprisingly the randomforest models performed the best. Surprising, they ran much faster than the glm models. It was also interesting to see that increasing variables per tree did reduce false fraud predictions, it also slightly reduced the number of correct predictions and missed fraud.   Looking at the err rate for the model: 
+
+```{r rf251 plot error, message = FALSE, error = FALSE, warning = FALSE, fig.width = 3.5, fig.height=2}  
+# plotting trees / error
+oobData251 %>% filter(variable == 1) %>% 
+  ggplot(aes(x = trees, y = error)) + geom_line(color = "blue") + ylim(0.26,0.325) +
+  theme_bw(base_size = 8) + theme(plot.title = element_text(size=9)) + ggtitle("Fraud Error Rate by Number of Trees") 
+```
+\  
+
+  Adding more trees could still improve the model, but the error rate appears to be stabilizing.  I will use the RandomForest 251 trees model for final validation.  
+  
+\  
+\  
+
+_Note on Variation of RandomForest Results_: Even with setting a seed, there is still randomness introduced in the algorithm and the results change slightly when re-run.  (Setting the seed did create reproducible models results when run on the same day.)  During testing, I ran multiple randomForest 251 models with mtry at 4 and 5 although I did not include the code and results here to save time (on an already lengthy project).  The mtry=5 models had a lot of variation in their results and in the class 1 error.  They sometimes performed thousands of dollars better or worse. Mtry=4 models had less variation both results and class error.  My assumption is that the mtry=5 sometimes picked up very good trends and also over-fit trees.  This means that while 251 trees can produce very good results, the number of trees is too low to fit a stable model.  Unfortunately, my laptop errors out at 300 trees.  Online I have seen rf models with 1000 and 1500 trees which would produce more stable and better results!  
+
+\  
+\  
+
+  
+```{r randomForest 251 final valid, message = FALSE, error = FALSE, warning = FALSE}
+###   Final Validation: RF Model  2   ###
+# predictions
+yhat_rf251 <- predict(fit_rf251, test_set, type = "class")
+# Evaluating model performance
+cm_rf <- as.data.frame.matrix(confusionMatrix(yhat_rf251, test_set$is_fraud)$table)
+rf251_Sp <- confusionMatrix(yhat_rf251 , test_set$is_fraud)$byClass["Specificity"]
+rf251_NPV <- confusionMatrix(yhat_rf251, test_set$is_fraud)$byClass["Neg Pred Value"]
+# Calculating Model Costs
+final_preds <- cbind(final_preds, yhat_rf251)
+rf251_saved <- final_preds %>% filter(results == 1 & yhat_rf251 == 1) %>% summarize(sum(amt)) %>% pull()  
+rf251_miscl<- final_preds %>% filter(results == 0 & yhat_rf251 == 1) %>% summarize(sum(amt)) %>% pull()  
+rf251_miss <- final_preds %>% filter(results == 1 & yhat_rf251 == 0) %>% summarize(sum(amt)) %>% pull()   
+rf251_savedpct <- rf251_saved/cost
+rf251_misclpct <- rf251_miscl/cost
+# Saving results
+final_results <- bind_rows(final_results,
+                          data_frame(Model = "RandomForest 251", AmtSaved = rf251_saved, FraudMissed = rf251_miss, MisClassified = rf251_miscl, 
+                                     SavedPct = rf251_savedpct, MisClassPct = rf251_misclpct, Specificity = rf251_Sp, NPV = rf251_NPV))
+# Removing large element
+rm(yhat_rf251)
+```
+\  
+\  
+
+  
+## Final Validation     
+
+For final validation of the chosen models, I am running each on the validation set containing 20% of original data not used in training the models or data exploration. 
+
+  * Rpart with tuned complexity parameter including credit card numbers as categorical variables:  _Formula: rpart(is_fraud ~ amount+category+hour+month+day+weekday+cc_num, cp=0.000383, method=“class”)_
+  * Glm with interaction between category, amount, and bins with predicted outcomes > 0.4:  _Formula: glm(is_fraud ~ amount * category * bins+hour+month+day+weekday, family=“binomial”)_
+  * RandomForest with 251 trees sampling 4 predictors: _Formula: randomForest(is_fraud ~ ., ntree=251, mtry=4, replacement=TRUE, importance=TRUE)_  
+  
+\  
+\  
+
+
+**Final Validation Results**: Even with only half the default number of trees, random forest performed the best and was able to correctly predict 83% of the fraudulent transactions costs.  Glm was very close saving just \$7000 less by choosing predictions > .4, but it had the most misclassified amount overall. Even though rpart saved the least amount, it performed best at not misclassifying legitimate transactions.  
+\  
+  
+Final Models Confusion Matrices Comparison:
+```{r cms, message = FALSE, error = FALSE, warning = FALSE}
+# combining confusion matrices
+cms <-cbind(cm_rpart, cm_glm, cm_rf)
+# printing final cms
+kable(cms) %>%
+  add_header_above(c(" "=1,"Rpart"=2,"Glm"=2,"RandomForest"=2)) %>%
+  kable_styling(font_size = 9,latex_options = "HOLD_position")
+```  
+
+
+Final Models Cost Results Comparison:
+```{r final results, message = FALSE, error = FALSE, warning = FALSE}
+# printing final validation results
+kable(final_results, digits = 2, escape = F, align = "r") %>%
+    kable_styling(font_size = 9, latex_options = "HOLD_position") 
+```
+\  
+\  
+
+
+ 
+## Conclusion  
+
+With fraud detection, companies must decide on a balance between true positives (specificity), false positives (misclassified), false negatives and the resulting costs. As seen in the confusion matrices, adjusting models to increase the number of true fraud predictions often impacts missed fraud predictions and false fraud predictions. More importantly revenue saved or lost can vary more dramatically than the confusion matrix results show.  These models could continue to be tuned and improved, Unfortunately, and with only 251 trees randomForest does not return consistent results. Even this limited model, would have saved my synthetic credit card company about 83% which I think is a pretty successful beginning to credit card fraud detection model.  
+  
+  
+Although this was a synthetic dataset without real-life predictors and cannot be used as an actual fraud detection model, many insights are able to be gained.  The size of the dataset did cause complications. Larger processing capability and memory would improve modeling. Also, additional cost-sensitive algorithms could be explored or synthetic over-sampling techniques such as SMOTE which may improve results.  Instead of rpart the party package could be used which models conditional probabilities more effectively.
+
+In the end, even with this highly-imbalanced dataset and limited predictors, several models were created that had significant cost saving capabilities. Overall, I found this to be a very educational project into anomaly detection algorithms and effective metrics.  
+  
+  
+  
+  
+\newpage  
+  
+## References  
+
+[1] Irizarry, Rafael. (2021). [Machine Learning, Section 31.10: Classification and regression trees (CART). Introduction to Data Science.](https://rafalab.github.io/dsbook/examples-of-algorithms.html#classification-and-regression-trees-cart)
+
+[2] Therneau, T.M., Atkinson, E.J. (April 11, 2019). [An Introduction to Recursive Partitioning Using the RPART Routines](https://cran.r-project.org/web/packages/rpart/vignettes/longintro.pdf)
+
+[3] Irizarry, Rafael. (2021). [Machine Learning, Section 31.11: Random forests. Introduction to Data Science.](https://rafalab.github.io/dsbook/examples-of-algorithms.html#random-forests)
+
+[4] Liaw, Andy. (March 25, 2018). [Package 'randomForest'.](https://cran.r-project.org/web/packages/randomForest/randomForest.pdf)
+
+[5] Irizarry, Rafael. (2021). [Machine Learning, Section 31.3: Logistic Regression. Introduction to Data Science.](https://rafalab.github.io/dsbook/examples-of-algorithms.html#logistic-regression)
+
+[6] Brownlee, Jason. (February 7, 2020). [Cost-Sensitive Learning for Imbalanced Classification.](https://machinelearningmastery.com/cost-sensitive-learning-for-imbalanced-classification/)
+
+[7] Kabacoff, R.I. (2017). [Tree Bases Models.](https://www.statmethods.net/advstats/cart.html)
+
+[8] Brownlee, Jason. (February 5, 2016). [Tune Machine Learning Algorithms in R (random forest case study).](https://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/)
+
